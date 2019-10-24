@@ -79,11 +79,12 @@
 
 #include "dns.h"
 
-
 /*
  * C O M P I L E R  V E R S I O N  &  F E A T U R E  D E T E C T I O N
  *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+#define QID_BEGIN 1024
 
 #define DNS_GNUC_2VER(M, m, p) (((M) * 10000) + ((m) * 100) + (p))
 #define DNS_GNUC_PREREQ(M, m, p) (__GNUC__ > 0 && DNS_GNUC_2VER(__GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__) >= DNS_GNUC_2VER((M), (m), (p)))
@@ -1495,6 +1496,7 @@ dns_b_move(struct dns_buf *dst, const struct dns_buf *_src, size_t n)
 	return dst->error;
 }
 
+static void print_packet(struct dns_packet *P, FILE *fp);
 
 /*
  * P A C K E T  R O U T I N E S
@@ -6590,6 +6592,7 @@ static int dns_so_tcp_recv(struct dns_socket *so) {
 int dns_so_check(struct dns_socket *so) {
 	int error;
 	long n;
+	int cycle_count = 0;
 
 retry:
 	switch (so->state) {
@@ -6609,17 +6612,30 @@ retry:
 
 		so->state++;
 	case DNS_SO_UDP_RECV:
-		if (0 > (n = recv(so->udp, (void *)so->answer->data, so->answer->size, 0)))
-			goto soerr;
 
-		so->stat.udp.rcvd.bytes += n;
-		so->stat.udp.rcvd.count++;
+		// printf("in cycle now\n");
+		if (0 > (n = recv(so->udp, (void *)so->answer->data, so->answer->size, 0))){
+			// printf("recv soerr!\n");
+			goto retry;
+		}
 
 		if ((so->answer->end = n) < 12)
 			goto trash;
 
 		if ((error = dns_so_verify(so, so->answer)))
 			goto trash;
+
+		cycle_count++;
+		printf("successful: %d\n", cycle_count);
+		so->stat.udp.rcvd.bytes += n;
+		so->stat.udp.rcvd.count++;
+		print_packet(so->answer, stdout);
+		if(cycle_count < 3){
+			so->stat.udp.rcvd.bytes -= n;
+			so->stat.udp.rcvd.count--;
+			goto retry;
+		}
+		printf("DNS_SO_UDP_RECV finished\n");
 
 		so->state++;
 	case DNS_SO_UDP_DONE:
@@ -9428,16 +9444,23 @@ static int send_query(int argc, char *argv[]) {
 	if (!(so = dns_so_open((struct sockaddr *)&resconf()->iface, type, dns_opts(), &error)))
 		panic("dns_so_open: %s", dns_strerror(error));
 
-	while (!(A = dns_so_query(so, Q, (struct sockaddr *)&ss, &error))) {
-		if (error != DNS_EAGAIN)
-			panic("dns_so_query: %s (%d)", dns_strerror(error), error);
-		if (dns_so_elapsed(so) > 10)
-			panic("query timed-out");
+	printf("start query\n");
+	int rev_count = 0;
+	while(rev_count < 2){
+		dns_header(Q)->qid = QID_BEGIN + rev_count;
+		while (!(A = dns_so_query(so, Q, (struct sockaddr *)&ss, &error))) {
+			if (error != DNS_EAGAIN)
+				panic("dns_so_query: %s (%d)", dns_strerror(error), error);
+			if (dns_so_elapsed(so) > 10)
+				panic("query timed-out");
 
-		dns_so_poll(so, 1);
+			dns_so_poll(so, 1);
+		}
+		print_packet(A, stdout);
+		rev_count++;
 	}
 
-	print_packet(A, stdout);
+	// print_packet(A, stdout);
 
 	dns_so_close(so);
 
